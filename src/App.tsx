@@ -100,6 +100,37 @@ function localIntent(query: string, lang: Language): string | null {
   return null;
 }
 
+
+function isWeatherQuestion(text: string) {
+  return /\b(weather|temperature|forecast|rain|raining|humidity)\b/i.test(text) || /వాతావరణం|ఉష్ణోగ్రత|వర్షం|వాన పడ/.test(text);
+}
+function extractWeatherLocation(text: string) {
+  const match = text.match(/\b(?:weather|temperature|forecast|rain|raining|humidity)\s+(?:in|at|for|near)\s+(.+?)\s*$/i)
+    || text.match(/\b(?:in|at|for|near)\s+([a-z][a-z .'-]{1,50})\s*$/i);
+  return match?.[1]?.trim().replace(/[?.!,]+$/, '') || '';
+}
+function weatherDescription(code: number, lang: Language) {
+  const en: Record<number, string> = {0:'clear sky',1:'mostly clear',2:'partly cloudy',3:'overcast',45:'fog',48:'freezing fog',51:'light drizzle',53:'drizzle',55:'heavy drizzle',61:'light rain',63:'rain',65:'heavy rain',71:'light snow',73:'snow',75:'heavy snow',80:'rain showers',81:'showers',82:'heavy showers',95:'thunderstorm',96:'thunderstorm with hail',99:'heavy thunderstorm with hail'};
+  const te: Record<number, string> = {0:'ఆకాశం నిర్మలంగా ఉంది',1:'ఎక్కువగా నిర్మలంగా ఉంది',2:'కొంత మేఘావృతం',3:'మేఘావృతం',45:'పొగమంచు ఉంది',48:'చల్లని పొగమంచు ఉంది',51:'తేలికపాటి చిరుజల్లులు',53:'చిరుజల్లులు',55:'భారీ చిరుజల్లులు',61:'తేలికపాటి వర్షం',63:'వర్షం పడుతోంది',65:'భారీ వర్షం',71:'తేలికపాటి మంచు',73:'మంచు పడుతోంది',75:'భారీ మంచు',80:'వర్షపు జల్లులు',81:'జల్లులు పడుతున్నాయి',82:'భారీ వర్షపు జల్లులు',95:'ఉరుములతో కూడిన వర్షం',96:'వడగళ్లతో ఉరుముల వర్షం',99:'భారీ ఉరుములు, వడగళ్ల వర్షం'};
+  return (lang === 'te-IN' ? te[code] : en[code]) || (lang === 'te-IN' ? 'వాతావరణ వివరాలు అందుబాటులో ఉన్నాయి' : 'weather conditions available');
+}
+async function getWeather(city: string, lang: Language) {
+  const geoUrl = new URL('https://geocoding-api.open-meteo.com/v1/search');
+  geoUrl.searchParams.set('name', city); geoUrl.searchParams.set('count', '1'); geoUrl.searchParams.set('language', lang === 'te-IN' ? 'te' : 'en'); geoUrl.searchParams.set('format', 'json');
+  const geoResponse = await fetch(geoUrl.toString());
+  if (!geoResponse.ok) throw new Error('Location search failed');
+  const place = (await geoResponse.json())?.results?.[0];
+  if (!place) return lang === 'te-IN' ? city + ' అనే ప్రదేశం దొరకలేదు. మరో నగరం పేరు చెప్పండి.' : "I couldn't find " + city + ". Please say another city or town.";
+  const url = new URL('https://api.open-meteo.com/v1/forecast');
+  url.searchParams.set('latitude', String(place.latitude)); url.searchParams.set('longitude', String(place.longitude));
+  url.searchParams.set('current', 'temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m');
+  url.searchParams.set('daily', 'temperature_2m_max,temperature_2m_min,precipitation_probability_max'); url.searchParams.set('forecast_days', '1'); url.searchParams.set('timezone', 'auto');
+  const response = await fetch(url.toString()); if (!response.ok) throw new Error('Weather service failed');
+  const data = await response.json(), c = data.current, d = data.daily, desc = weatherDescription(c.weather_code, lang);
+  if (lang === 'te-IN') return place.name + ' లో ప్రస్తుత వాతావరణం: ' + desc + '. ఉష్ణోగ్రత ' + Math.round(c.temperature_2m) + ' డిగ్రీల సెల్సియస్, అనిపించే ఉష్ణోగ్రత ' + Math.round(c.apparent_temperature) + ' డిగ్రీలు, తేమ ' + c.relative_humidity_2m + శాతం, గాలి వేగం గంటకు ' + Math.round(c.wind_speed_10m) + ' కిలోమీటర్లు. ఈ రోజు గరిష్ఠం ' + Math.round(d.temperature_2m_max[0]) + ', కనిష్ఠం ' + Math.round(d.temperature_2m_min[0]) + ' డిగ్రీలు. వర్షం పడే అవకాశం ' + (d.precipitation_probability_max[0] ?? 'తెలియదు') + ' శాతం.';
+  return 'Current weather in ' + place.name + ', ' + (place.country || '') + ': ' + desc + '. Temperature ' + Math.round(c.temperature_2m) + '°C, feels like ' + Math.round(c.apparent_temperature) + '°C, humidity ' + c.relative_humidity_2m + '%, wind ' + Math.round(c.wind_speed_10m) + ' km/h. Today high ' + Math.round(d.temperature_2m_max[0]) + '°C, low ' + Math.round(d.temperature_2m_min[0]) + '°C; precipitation chance ' + (d.precipitation_probability_max[0] ?? 'unknown') + '%.';
+}
+
 function getSearchQuery(text: string) {
   return text
     .replace(/^(hey\s+)?(jarvis|sai|shiva)[,\s]*/i, '')
@@ -121,6 +152,8 @@ export default function App() {
   const [showHelp, setShowHelp] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [webFallback, setWebFallback] = useState(false);
+  const [awaitingWeatherLocation, setAwaitingWeatherLocation] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const nextId = useRef(2);
   const recognitionRef = useRef<any>(null);
   const inFlightRef = useRef(false);
@@ -159,6 +192,27 @@ export default function App() {
     setInput('');
 
     try {
+      if (awaitingWeatherLocation) {
+        setAwaitingWeatherLocation(false);
+        await reply(await getWeather(question, lang));
+        return;
+      }
+      if (isWeatherQuestion(question)) {
+        const location = extractWeatherLocation(question);
+        if (!location) {
+          setAwaitingWeatherLocation(true);
+          await reply(lang === 'te-IN' ? 'ఏ ప్రదేశంలో వాతావరణం తెలుసుకోవాలి? దయచేసి నగరం లేదా ఊరి పేరు చెప్పండి.' : 'Which location should I check the weather for? Please say a city or town.');
+          return;
+        }
+        await reply(await getWeather(location, lang));
+        return;
+      }
+      if (/\b(read|open|read out|summarize)\s+(the\s+)?(file|document|pdf|text file)\b/i.test(question) || /ఫైల్ చదువు|ఫైల్ తెరువు|డాక్యుమెంట్ చదువు/.test(question)) {
+        await reply(lang === 'te-IN' ? 'చదవాల్సిన టెక్స్ట్ ఫైల్ ఎంచుకోండి. అనుమతి కోసం ఫైల్ ఎంపిక విండో తెరుస్తున్నాను.' : 'Choose the text file you want me to read. The file picker will ask you to select it.');
+        fileInputRef.current?.click();
+        return;
+      }
+
       const local = localIntent(question, lang);
       if (local) {
         await reply(local);
@@ -345,6 +399,18 @@ export default function App() {
         </label>
         <p className="settings-note">{lang === 'te-IN' ? 'వాయిస్ ఇన్‌పుట్ కోసం మైక్రోఫోన్ అనుమతి అవసరం. భాష ఎంపికను బట్టి ఫోన్‌లో అందుబాటులో ఉన్న వాయిస్ మారవచ్చు.' : 'Microphone permission is required for voice input. Available voices depend on your device.'}</p>
       </section>}
+
+      <input ref={fileInputRef} type="file" className="visually-hidden" accept=".txt,.md,.csv,.json,.log,.html,.xml" aria-label="Choose a text file to read" onChange={async (event) => {
+        const file = event.target.files?.[0]; if (!file) return;
+        setBusy(true); setStatus(lang === 'te-IN' ? 'ఫైల్ చదువుతున్నాను…' : 'Reading file…');
+        try {
+          const contents = (await file.text()).replace(/\s+/g, ' ').trim();
+          if (!contents) await reply(lang === 'te-IN' ? 'ఈ ఫైల్‌లో చదవగలిగే టెక్స్ట్ లేదు.' : 'This file has no readable text.');
+          else await reply((lang === 'te-IN' ? file.name + ' ఫైల్ చదివాను. ' : 'I read ' + file.name + '. ') + (contents.length > 7000 ? contents.slice(0, 7000) + (lang === 'te-IN' ? '... ఫైల్ పెద్దది కాబట్టి మొదటి భాగం మాత్రమే.' : '... file is long, so only the first part is read.') : contents));
+        } catch (error) {
+          console.error(error); await reply(lang === 'te-IN' ? 'ఈ ఫైల్ చదవలేకపోయాను. టెక్స్ట్ ఫైల్‌ను ప్రయత్నించండి.' : 'I could not read this file. Please try a text file.');
+        } finally { setBusy(false); setStatus(lang === 'te-IN' ? 'సిద్ధంగా ఉంది · Ready' : 'Ready'); event.target.value = ''; }
+      }} />
 
       <section id="main-content" className="conversation" aria-labelledby="conversation-title">
         <div className="section-heading"><h2 id="conversation-title">{lang === 'te-IN' ? 'మన సంభాషణ' : 'Conversation'}</h2><span>{messages.length} {lang === 'te-IN' ? 'సందేశాలు' : 'messages'}</span></div>
